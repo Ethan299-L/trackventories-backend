@@ -585,6 +585,105 @@ app.use((error, req, res, next) => {
 });
 
 // ============================
+// ADMIN ENDPOINTS FOR DASHBOARD
+// ============================
+
+/**
+ * Get all customers (for admin dashboard)
+ */
+app.get('/api/stripe/customers', async (req, res) => {
+  try {
+    const customers = await stripe.customers.list({
+      limit: 100,
+      expand: ['data.subscriptions']
+    });
+
+    res.json({
+      success: true,
+      customers: customers.data
+    });
+  } catch (error) {
+    console.error('Error retrieving all customers:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+      customers: []
+    });
+  }
+});
+
+/**
+ * Get dashboard statistics
+ */
+app.get('/api/stripe/dashboard-stats', async (req, res) => {
+  try {
+    // Get customers
+    const customersResponse = await stripe.customers.list({ limit: 100 });
+    const totalCustomers = customersResponse.data.length;
+
+    // Get active subscriptions
+    const activeSubscriptions = await stripe.subscriptions.list({ 
+      status: 'active',
+      limit: 100 
+    });
+
+    // Get trial subscriptions
+    const trialSubscriptions = await stripe.subscriptions.list({ 
+      status: 'trialing',
+      limit: 100 
+    });
+
+    // Calculate monthly revenue
+    let monthlyRevenue = 0;
+    activeSubscriptions.data.forEach(sub => {
+      if (sub.items && sub.items.data[0] && sub.items.data[0].price) {
+        monthlyRevenue += sub.items.data[0].price.unit_amount || 0;
+      }
+    });
+
+    res.json({
+      success: true,
+      stats: {
+        totalCustomers: totalCustomers,
+        activeSubscriptions: activeSubscriptions.data.length,
+        trialUsers: trialSubscriptions.data.length,
+        monthlyRevenue: monthlyRevenue / 100
+      }
+    });
+  } catch (error) {
+    console.error('Error getting dashboard stats:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Get all subscriptions
+ */
+app.get('/api/stripe/all-subscriptions', async (req, res) => {
+  try {
+    const subscriptions = await stripe.subscriptions.list({
+      limit: 100,
+      expand: ['data.customer']
+    });
+
+    res.json({
+      success: true,
+      subscriptions: subscriptions.data
+    });
+  } catch (error) {
+    console.error('Error retrieving subscriptions:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+      subscriptions: []
+    });
+  }
+});
+
+// ============================
 // START SERVER
 // ============================
 
