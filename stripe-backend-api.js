@@ -1,22 +1,25 @@
 /**
- * Stripe Backend API for TrackVentories
+ * Complete Stripe Backend API for TrackVentories
  * 
- * This file contains all the backend endpoints for Stripe operations.
- * Deploy this on your Node.js server (Express.js recommended).
+ * This file contains all the backend endpoints for Stripe operations including
+ * real-time payment method retrieval without local storage.
  * 
  * Required packages:
- * npm install stripe express cors body-parser dotenv
+ * npm install stripe express cors body-parser dotenv helmet
  * 
  * Environment variables needed in .env file:
  * STRIPE_SECRET_KEY=sk_test_your_secret_key_here
  * STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret_here
+ * PORT=3000
+ * NODE_ENV=production
  * 
- * Set up webhook endpoint: POST /api/stripe/webhook
+ * Deploy this to Heroku, Railway, Vercel, or any Node.js hosting service
  */
 
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const helmet = require('helmet');
 require('dotenv').config();
 
 // Initialize Stripe with secret key
@@ -24,14 +27,25 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 
-// Middleware
-app.use(cors());
+// Security and middleware
+app.use(helmet());
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' 
+    ? ['https://yourdomain.com', 'https://www.yourdomain.com'] 
+    : ['http://localhost:3000', 'http://127.0.0.1:5500'],
+  credentials: true
+}));
 
 // For webhook verification, we need raw body
 app.use('/api/stripe/webhook', bodyParser.raw({ type: 'application/json' }));
 
 // For other routes, use JSON parser
 app.use(bodyParser.json());
+
+// Basic health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
 
 // ============================
 // CUSTOMER ENDPOINTS
@@ -43,6 +57,13 @@ app.use(bodyParser.json());
 app.post('/api/stripe/create-customer', async (req, res) => {
   try {
     const { email, name, metadata } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email is required'
+      });
+    }
 
     const customer = await stripe.customers.create({
       email: email,
@@ -71,6 +92,13 @@ app.post('/api/stripe/create-customer', async (req, res) => {
 app.post('/api/stripe/update-customer', async (req, res) => {
   try {
     const { customerId, ...updateData } = req.body;
+
+    if (!customerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Customer ID is required'
+      });
+    }
 
     const customer = await stripe.customers.update(customerId, updateData);
 
@@ -110,8 +138,72 @@ app.get('/api/stripe/customer/:customerId', async (req, res) => {
 });
 
 // ============================
-// PAYMENT METHOD ENDPOINTS
+// PAYMENT METHOD ENDPOINTS (UPDATED)
 // ============================
+
+/**
+ * Get all payment methods for a customer (NO LOCAL STORAGE NEEDED)
+ * This is the main endpoint for displaying payment methods in the UI
+ */
+app.get('/api/stripe/customer/:customerId/payment-methods', async (req, res) => {
+  try {
+    const { customerId } = req.params;
+
+    if (!customerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Customer ID is required',
+        paymentMethods: []
+      });
+    }
+
+    // Get all payment methods from Stripe
+    const paymentMethods = await stripe.paymentMethods.list({
+      customer: customerId,
+      type: 'card',
+      limit: 10 // Adjust as needed
+    });
+
+    // Get customer to check default payment method
+    const customer = await stripe.customers.retrieve(customerId);
+    const defaultPaymentMethodId = customer.invoice_settings?.default_payment_method;
+
+    // Format the response with safe card details
+    const formattedMethods = paymentMethods.data.map(pm => ({
+      id: pm.id,
+      brand: pm.card.brand, // 'visa', 'mastercard', etc.
+      last4: pm.card.last4, // Last 4 digits
+      expMonth: pm.card.exp_month,
+      expYear: pm.card.exp_year,
+      funding: pm.card.funding, // 'credit', 'debit', 'prepaid'
+      country: pm.card.country,
+      fingerprint: pm.card.fingerprint, // Unique card identifier
+      isDefault: pm.id === defaultPaymentMethodId,
+      created: pm.created,
+      // Additional safe metadata
+      checks: {
+        cvcCheck: pm.card.checks?.cvc_check,
+        addressLine1Check: pm.card.checks?.address_line1_check,
+        addressPostalCodeCheck: pm.card.checks?.address_postal_code_check
+      }
+    }));
+
+    res.json({
+      success: true,
+      paymentMethods: formattedMethods,
+      hasMore: paymentMethods.has_more,
+      defaultPaymentMethodId: defaultPaymentMethodId
+    });
+
+  } catch (error) {
+    console.error('Error retrieving payment methods:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+      paymentMethods: []
+    });
+  }
+});
 
 /**
  * Attach payment method to customer
@@ -119,6 +211,13 @@ app.get('/api/stripe/customer/:customerId', async (req, res) => {
 app.post('/api/stripe/attach-payment-method', async (req, res) => {
   try {
     const { paymentMethodId, customerId } = req.body;
+
+    if (!paymentMethodId || !customerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Payment method ID and customer ID are required'
+      });
+    }
 
     const paymentMethod = await stripe.paymentMethods.attach(paymentMethodId, {
       customer: customerId,
@@ -144,6 +243,13 @@ app.post('/api/stripe/set-default-payment-method', async (req, res) => {
   try {
     const { customerId, paymentMethodId } = req.body;
 
+    if (!customerId || !paymentMethodId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Customer ID and payment method ID are required'
+      });
+    }
+
     const customer = await stripe.customers.update(customerId, {
       invoice_settings: {
         default_payment_method: paymentMethodId,
@@ -152,7 +258,8 @@ app.post('/api/stripe/set-default-payment-method', async (req, res) => {
 
     res.json({
       success: true,
-      customer: customer
+      customer: customer,
+      defaultPaymentMethodId: paymentMethodId
     });
   } catch (error) {
     console.error('Error setting default payment method:', error);
@@ -164,37 +271,18 @@ app.post('/api/stripe/set-default-payment-method', async (req, res) => {
 });
 
 /**
- * Get customer's payment methods
- */
-app.get('/api/stripe/payment-methods/:customerId', async (req, res) => {
-  try {
-    const { customerId } = req.params;
-
-    const paymentMethods = await stripe.paymentMethods.list({
-      customer: customerId,
-      type: 'card',
-    });
-
-    res.json({
-      success: true,
-      paymentMethods: paymentMethods.data
-    });
-  } catch (error) {
-    console.error('Error retrieving payment methods:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message,
-      paymentMethods: []
-    });
-  }
-});
-
-/**
- * Delete a payment method
+ * Delete/detach a payment method
  */
 app.delete('/api/stripe/delete-payment-method', async (req, res) => {
   try {
     const { paymentMethodId } = req.body;
+
+    if (!paymentMethodId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Payment method ID is required'
+      });
+    }
 
     const paymentMethod = await stripe.paymentMethods.detach(paymentMethodId);
 
@@ -220,17 +308,26 @@ app.delete('/api/stripe/delete-payment-method', async (req, res) => {
  */
 app.post('/api/stripe/create-subscription', async (req, res) => {
   try {
-    const { customerId, priceId, paymentMethodId } = req.body;
+    const { customerId, priceId, paymentMethodId, trialPeriodDays } = req.body;
 
-    // Set the default payment method on the customer
-    await stripe.customers.update(customerId, {
-      invoice_settings: {
-        default_payment_method: paymentMethodId,
-      },
-    });
+    if (!customerId || !priceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Customer ID and price ID are required'
+      });
+    }
 
-    // Create the subscription
-    const subscription = await stripe.subscriptions.create({
+    // Set the default payment method on the customer if provided
+    if (paymentMethodId) {
+      await stripe.customers.update(customerId, {
+        invoice_settings: {
+          default_payment_method: paymentMethodId,
+        },
+      });
+    }
+
+    // Create subscription configuration
+    const subscriptionData = {
       customer: customerId,
       items: [{ price: priceId }],
       payment_settings: {
@@ -243,7 +340,14 @@ app.post('/api/stripe/create-subscription', async (req, res) => {
         save_default_payment_method: 'on_subscription',
       },
       expand: ['latest_invoice.payment_intent'],
-    });
+    };
+
+    // Add trial period if specified
+    if (trialPeriodDays && trialPeriodDays > 0) {
+      subscriptionData.trial_period_days = trialPeriodDays;
+    }
+
+    const subscription = await stripe.subscriptions.create(subscriptionData);
 
     res.json({
       success: true,
@@ -259,41 +363,18 @@ app.post('/api/stripe/create-subscription', async (req, res) => {
 });
 
 /**
- * Create a trial subscription
- */
-app.post('/api/stripe/create-trial-subscription', async (req, res) => {
-  try {
-    const { customerId, priceId, trialPeriodDays = 7 } = req.body;
-
-    const subscription = await stripe.subscriptions.create({
-      customer: customerId,
-      items: [{ price: priceId }],
-      trial_period_days: trialPeriodDays,
-      payment_settings: {
-        payment_method_types: ['card'],
-        save_default_payment_method: 'on_subscription',
-      },
-    });
-
-    res.json({
-      success: true,
-      subscription: subscription
-    });
-  } catch (error) {
-    console.error('Error creating trial subscription:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
  * Update a subscription (change plan)
  */
 app.post('/api/stripe/update-subscription', async (req, res) => {
   try {
     const { subscriptionId, priceId } = req.body;
+
+    if (!subscriptionId || !priceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Subscription ID and price ID are required'
+      });
+    }
 
     const subscription = await stripe.subscriptions.retrieve(subscriptionId);
     
@@ -325,6 +406,13 @@ app.post('/api/stripe/cancel-subscription', async (req, res) => {
   try {
     const { subscriptionId, cancelImmediately = false } = req.body;
 
+    if (!subscriptionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Subscription ID is required'
+      });
+    }
+
     let subscription;
     if (cancelImmediately) {
       subscription = await stripe.subscriptions.cancel(subscriptionId);
@@ -348,21 +436,58 @@ app.post('/api/stripe/cancel-subscription', async (req, res) => {
 });
 
 /**
- * Get customer's subscriptions
+ * Get customer's subscriptions with detailed information
  */
 app.get('/api/stripe/subscriptions/:customerId', async (req, res) => {
   try {
     const { customerId } = req.params;
 
+    if (!customerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Customer ID is required',
+        subscriptions: []
+      });
+    }
+
     const subscriptions = await stripe.subscriptions.list({
       customer: customerId,
       status: 'all',
-      expand: ['data.default_payment_method'],
+      expand: ['data.default_payment_method', 'data.items.data.price.product'],
+      limit: 10
     });
+
+    // Format subscription data for frontend
+    const formattedSubscriptions = subscriptions.data.map(sub => ({
+      id: sub.id,
+      status: sub.status,
+      currentPeriodStart: sub.current_period_start,
+      currentPeriodEnd: sub.current_period_end,
+      cancelAtPeriodEnd: sub.cancel_at_period_end,
+      canceledAt: sub.canceled_at,
+      trialStart: sub.trial_start,
+      trialEnd: sub.trial_end,
+      created: sub.created,
+      items: sub.items.data.map(item => ({
+        id: item.id,
+        priceId: item.price.id,
+        productId: item.price.product,
+        unitAmount: item.price.unit_amount,
+        currency: item.price.currency,
+        interval: item.price.recurring?.interval,
+        intervalCount: item.price.recurring?.interval_count,
+        quantity: item.quantity
+      })),
+      defaultPaymentMethod: sub.default_payment_method ? {
+        id: sub.default_payment_method.id,
+        brand: sub.default_payment_method.card?.brand,
+        last4: sub.default_payment_method.card?.last4
+      } : null
+    }));
 
     res.json({
       success: true,
-      subscriptions: subscriptions.data
+      subscriptions: formattedSubscriptions
     });
   } catch (error) {
     console.error('Error retrieving subscriptions:', error);
@@ -384,16 +509,59 @@ app.get('/api/stripe/subscriptions/:customerId', async (req, res) => {
 app.get('/api/stripe/invoices/:customerId', async (req, res) => {
   try {
     const { customerId } = req.params;
-    const { limit = 10 } = req.query;
+    const { limit = 10, status = 'all' } = req.query;
 
-    const invoices = await stripe.invoices.list({
+    if (!customerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Customer ID is required',
+        invoices: []
+      });
+    }
+
+    const queryParams = {
       customer: customerId,
       limit: parseInt(limit),
-    });
+      expand: ['data.payment_intent']
+    };
+
+    // Filter by status if specified
+    if (status !== 'all') {
+      queryParams.status = status;
+    }
+
+    const invoices = await stripe.invoices.list(queryParams);
+
+    // Format invoice data
+    const formattedInvoices = invoices.data.map(invoice => ({
+      id: invoice.id,
+      number: invoice.number,
+      status: invoice.status,
+      amountPaid: invoice.amount_paid,
+      amountDue: invoice.amount_due,
+      total: invoice.total,
+      subtotal: invoice.subtotal,
+      tax: invoice.tax,
+      currency: invoice.currency,
+      created: invoice.created,
+      dueDate: invoice.due_date,
+      paidAt: invoice.status_transitions?.paid_at,
+      invoicePdf: invoice.invoice_pdf,
+      hostedInvoiceUrl: invoice.hosted_invoice_url,
+      description: invoice.description,
+      lines: invoice.lines.data.map(line => ({
+        id: line.id,
+        description: line.description,
+        amount: line.amount,
+        quantity: line.quantity,
+        priceId: line.price?.id
+      }))
+    }));
 
     res.json({
       success: true,
-      invoices: invoices.data
+      invoices: formattedInvoices,
+      hasMore: invoices.has_more
     });
   } catch (error) {
     console.error('Error retrieving invoices:', error);
@@ -401,6 +569,30 @@ app.get('/api/stripe/invoices/:customerId', async (req, res) => {
       success: false,
       error: error.message,
       invoices: []
+    });
+  }
+});
+
+/**
+ * Get specific invoice details
+ */
+app.get('/api/stripe/invoice/:invoiceId', async (req, res) => {
+  try {
+    const { invoiceId } = req.params;
+
+    const invoice = await stripe.invoices.retrieve(invoiceId, {
+      expand: ['payment_intent', 'subscription', 'customer']
+    });
+
+    res.json({
+      success: true,
+      invoice: invoice
+    });
+  } catch (error) {
+    console.error('Error retrieving invoice:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
     });
   }
 });
@@ -425,6 +617,200 @@ app.get('/api/stripe/invoice-pdf/:invoiceId', async (req, res) => {
     res.redirect(invoice.invoice_pdf);
   } catch (error) {
     console.error('Error retrieving invoice PDF:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Send invoice to customer
+ */
+app.post('/api/stripe/send-invoice', async (req, res) => {
+  try {
+    const { invoiceId } = req.body;
+
+    if (!invoiceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invoice ID is required'
+      });
+    }
+
+    const invoice = await stripe.invoices.sendInvoice(invoiceId);
+
+    res.json({
+      success: true,
+      invoice: invoice
+    });
+  } catch (error) {
+    console.error('Error sending invoice:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ============================
+// UTILITY ENDPOINTS
+// ============================
+
+/**
+ * Get available prices/plans
+ */
+app.get('/api/stripe/prices', async (req, res) => {
+  try {
+    const prices = await stripe.prices.list({
+      active: true,
+      expand: ['data.product'],
+      limit: 20
+    });
+
+    res.json({
+      success: true,
+      prices: prices.data
+    });
+  } catch (error) {
+    console.error('Error retrieving prices:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+      prices: []
+    });
+  }
+});
+
+/**
+ * Create a setup intent for future payments
+ */
+app.post('/api/stripe/create-setup-intent', async (req, res) => {
+  try {
+    const { customerId } = req.body;
+
+    if (!customerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Customer ID is required'
+      });
+    }
+
+    const setupIntent = await stripe.setupIntents.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      usage: 'off_session'
+    });
+
+    res.json({
+      success: true,
+      client_secret: setupIntent.client_secret
+    });
+  } catch (error) {
+    console.error('Error creating setup intent:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Create a payment intent for one-time payments
+ */
+app.post('/api/stripe/create-payment-intent', async (req, res) => {
+  try {
+    const { amount, currency = 'usd', customerId, paymentMethodId, description } = req.body;
+
+    if (!amount || !customerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Amount and customer ID are required'
+      });
+    }
+
+    const paymentIntentData = {
+      amount: Math.round(amount * 100), // Convert to cents
+      currency: currency,
+      customer: customerId,
+      description: description,
+      automatic_payment_methods: {
+        enabled: true,
+      },
+    };
+
+    if (paymentMethodId) {
+      paymentIntentData.payment_method = paymentMethodId;
+      paymentIntentData.confirm = true;
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create(paymentIntentData);
+
+    res.json({
+      success: true,
+      paymentIntent: paymentIntent
+    });
+  } catch (error) {
+    console.error('Error creating payment intent:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Get dashboard statistics for admin
+ */
+app.get('/api/stripe/dashboard-stats', async (req, res) => {
+  try {
+    const { period = '30days' } = req.query;
+    
+    // Calculate date range
+    const now = Math.floor(Date.now() / 1000);
+    let createdGte;
+    
+    switch (period) {
+      case '7days':
+        createdGte = now - (7 * 24 * 60 * 60);
+        break;
+      case '30days':
+        createdGte = now - (30 * 24 * 60 * 60);
+        break;
+      case '90days':
+        createdGte = now - (90 * 24 * 60 * 60);
+        break;
+      default:
+        createdGte = now - (30 * 24 * 60 * 60);
+    }
+
+    // Get customers, subscriptions, and charges
+    const [customers, subscriptions, charges] = await Promise.all([
+      stripe.customers.list({ created: { gte: createdGte }, limit: 100 }),
+      stripe.subscriptions.list({ status: 'active', limit: 100 }),
+      stripe.charges.list({ created: { gte: createdGte }, limit: 100 })
+    ]);
+
+    // Calculate metrics
+    const totalCustomers = customers.data.length;
+    const activeSubscriptions = subscriptions.data.length;
+    const totalRevenue = charges.data
+      .filter(charge => charge.paid)
+      .reduce((sum, charge) => sum + charge.amount, 0) / 100;
+    const averageOrderValue = charges.data.length > 0 ? totalRevenue / charges.data.length : 0;
+
+    res.json({
+      success: true,
+      stats: {
+        totalCustomers,
+        activeSubscriptions,
+        totalRevenue,
+        averageOrderValue,
+        period
+      }
+    });
+  } catch (error) {
+    console.error('Error getting dashboard stats:', error);
     res.status(400).json({
       success: false,
       error: error.message
@@ -472,6 +858,12 @@ app.post('/api/stripe/webhook', (req, res) => {
     case 'customer.subscription.trial_will_end':
       handleTrialWillEnd(event.data.object);
       break;
+    case 'payment_method.attached':
+      handlePaymentMethodAttached(event.data.object);
+      break;
+    case 'payment_method.detached':
+      handlePaymentMethodDetached(event.data.object);
+      break;
     default:
       console.log(`Unhandled event type: ${event.type}`);
   }
@@ -492,7 +884,7 @@ async function handleSubscriptionCreated(subscription) {
 async function handleSubscriptionUpdated(subscription) {
   console.log('Subscription updated:', subscription.id);
   // Update your database with new subscription details
-  // Notify customer of plan change
+  // Notify customer of plan change if needed
 }
 
 async function handleSubscriptionDeleted(subscription) {
@@ -519,58 +911,15 @@ async function handleTrialWillEnd(subscription) {
   // Remind them to update payment method
 }
 
-// ============================
-// UTILITY ENDPOINTS
-// ============================
+async function handlePaymentMethodAttached(paymentMethod) {
+  console.log('Payment method attached:', paymentMethod.id);
+  // Optional: Log payment method addition
+}
 
-/**
- * Get available prices/plans
- */
-app.get('/api/stripe/prices', async (req, res) => {
-  try {
-    const prices = await stripe.prices.list({
-      active: true,
-      expand: ['data.product'],
-    });
-
-    res.json({
-      success: true,
-      prices: prices.data
-    });
-  } catch (error) {
-    console.error('Error retrieving prices:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message,
-      prices: []
-    });
-  }
-});
-
-/**
- * Create a setup intent for future payments
- */
-app.post('/api/stripe/create-setup-intent', async (req, res) => {
-  try {
-    const { customerId } = req.body;
-
-    const setupIntent = await stripe.setupIntents.create({
-      customer: customerId,
-      payment_method_types: ['card'],
-    });
-
-    res.json({
-      success: true,
-      client_secret: setupIntent.client_secret
-    });
-  } catch (error) {
-    console.error('Error creating setup intent:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+async function handlePaymentMethodDetached(paymentMethod) {
+  console.log('Payment method detached:', paymentMethod.id);
+  // Optional: Log payment method removal
+}
 
 // ============================
 // ERROR HANDLING
@@ -584,103 +933,12 @@ app.use((error, req, res, next) => {
   });
 });
 
-// ============================
-// ADMIN ENDPOINTS FOR DASHBOARD
-// ============================
-
-/**
- * Get all customers (for admin dashboard)
- */
-app.get('/api/stripe/customers', async (req, res) => {
-  try {
-    const customers = await stripe.customers.list({
-      limit: 100,
-      expand: ['data.subscriptions']
-    });
-
-    res.json({
-      success: true,
-      customers: customers.data
-    });
-  } catch (error) {
-    console.error('Error retrieving all customers:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message,
-      customers: []
-    });
-  }
-});
-
-/**
- * Get dashboard statistics
- */
-app.get('/api/stripe/dashboard-stats', async (req, res) => {
-  try {
-    // Get customers
-    const customersResponse = await stripe.customers.list({ limit: 100 });
-    const totalCustomers = customersResponse.data.length;
-
-    // Get active subscriptions
-    const activeSubscriptions = await stripe.subscriptions.list({ 
-      status: 'active',
-      limit: 100 
-    });
-
-    // Get trial subscriptions
-    const trialSubscriptions = await stripe.subscriptions.list({ 
-      status: 'trialing',
-      limit: 100 
-    });
-
-    // Calculate monthly revenue
-    let monthlyRevenue = 0;
-    activeSubscriptions.data.forEach(sub => {
-      if (sub.items && sub.items.data[0] && sub.items.data[0].price) {
-        monthlyRevenue += sub.items.data[0].price.unit_amount || 0;
-      }
-    });
-
-    res.json({
-      success: true,
-      stats: {
-        totalCustomers: totalCustomers,
-        activeSubscriptions: activeSubscriptions.data.length,
-        trialUsers: trialSubscriptions.data.length,
-        monthlyRevenue: monthlyRevenue / 100
-      }
-    });
-  } catch (error) {
-    console.error('Error getting dashboard stats:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * Get all subscriptions
- */
-app.get('/api/stripe/all-subscriptions', async (req, res) => {
-  try {
-    const subscriptions = await stripe.subscriptions.list({
-      limit: 100,
-      expand: ['data.customer']
-    });
-
-    res.json({
-      success: true,
-      subscriptions: subscriptions.data
-    });
-  } catch (error) {
-    console.error('Error retrieving subscriptions:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message,
-      subscriptions: []
-    });
-  }
+// Handle 404
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Endpoint not found'
+  });
 });
 
 // ============================
@@ -690,13 +948,18 @@ app.get('/api/stripe/all-subscriptions', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`Stripe API server running on port ${PORT}`);
-  console.log('Available endpoints:');
+  console.log(`🚀 Stripe API server running on port ${PORT}`);
+  console.log('📋 Available endpoints:');
   console.log('  POST /api/stripe/create-customer');
+  console.log('  GET  /api/stripe/customer/:customerId/payment-methods');
+  console.log('  POST /api/stripe/set-default-payment-method');
+  console.log('  DELETE /api/stripe/delete-payment-method');
   console.log('  POST /api/stripe/create-subscription');
+  console.log('  GET  /api/stripe/subscriptions/:customerId');
+  console.log('  GET  /api/stripe/invoices/:customerId');
   console.log('  POST /api/stripe/webhook');
-  console.log('  GET  /api/stripe/payment-methods/:customerId');
-  console.log('  ... and more');
+  console.log('  GET  /api/stripe/dashboard-stats');
+  console.log('  GET  /health');
 });
 
 module.exports = app;
