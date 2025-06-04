@@ -29,28 +29,21 @@ const app = express();
 
 // Security and middleware
 app.use(helmet());
-app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? ['https://yourdomain.com', 'https://www.yourdomain.com'] 
-    : [
-        'http://localhost:3000', 
-        'http://127.0.0.1:5500',
-        'http://localhost:8000',    // Add this line
-        'http://127.0.0.1:8000',   // Add this line
-        'http://localhost:5000',   // Add common ports
-        'http://localhost:3001'    // Add common ports
-      ],
-  credentials: true
-}));
 
-// Or better yet, for development, allow all localhost origins:
+// Updated CORS configuration to handle localhost development
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
+    console.log('🌐 CORS request from origin:', origin);
     
-    // Allow any localhost origin for development
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) {
+      console.log('✅ No origin - allowing request');
+      return callback(null, true);
+    }
+    
+    // Allow ALL localhost origins for development
     if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      console.log('✅ Localhost origin allowed:', origin);
       return callback(null, true);
     }
     
@@ -58,17 +51,78 @@ app.use(cors({
     const allowedOrigins = [
       'https://yourdomain.com',
       'https://www.yourdomain.com',
-      'https://your-netlify-site.netlify.app'
+      'https://your-netlify-site.netlify.app',
+      'https://your-github-pages.github.io'
     ];
     
     if (allowedOrigins.includes(origin)) {
+      console.log('✅ Production origin allowed:', origin);
       return callback(null, true);
     }
     
-    return callback(new Error('Not allowed by CORS'));
+    console.log('❌ Origin blocked:', origin);
+    return callback(null, false);
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  optionsSuccessStatus: 200
 }));
+
+// For webhook verification, we need raw body
+app.use('/api/stripe/webhook', bodyParser.raw({ type: 'application/json' }));
+
+// For other routes, use JSON parser
+app.use(bodyParser.json());
+
+// ============================
+// BASIC ENDPOINTS
+// ============================
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    message: 'TrackVentories Backend is running!',
+    environment: process.env.NODE_ENV || 'development',
+    stripe_configured: !!process.env.STRIPE_SECRET_KEY
+  });
+});
+
+// Root endpoint with API information
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'TrackVentories Stripe Backend API', 
+    status: 'running',
+    version: '1.0.0',
+    endpoints: [
+      'GET /health - Health check',
+      'GET / - API information',
+      'POST /api/stripe/create-customer - Create Stripe customer',
+      'POST /api/stripe/update-customer - Update customer',
+      'GET /api/stripe/customer/:customerId - Get customer details',
+      'GET /api/stripe/customer/:customerId/payment-methods - Get payment methods',
+      'POST /api/stripe/attach-payment-method - Attach payment method',
+      'POST /api/stripe/set-default-payment-method - Set default payment method',
+      'DELETE /api/stripe/delete-payment-method - Delete payment method',
+      'POST /api/stripe/create-subscription - Create subscription',
+      'POST /api/stripe/update-subscription - Update subscription',
+      'POST /api/stripe/cancel-subscription - Cancel subscription',
+      'GET /api/stripe/subscriptions/:customerId - Get customer subscriptions',
+      'GET /api/stripe/invoices/:customerId - Get customer invoices',
+      'GET /api/stripe/invoice/:invoiceId - Get specific invoice',
+      'GET /api/stripe/invoice-pdf/:invoiceId - Download invoice PDF',
+      'POST /api/stripe/send-invoice - Send invoice to customer',
+      'GET /api/stripe/prices - Get available prices/plans',
+      'POST /api/stripe/create-setup-intent - Create setup intent',
+      'POST /api/stripe/create-payment-intent - Create payment intent',
+      'GET /api/stripe/dashboard-stats - Get dashboard statistics',
+      'POST /api/stripe/webhook - Stripe webhook handler'
+    ],
+    timestamp: new Date().toISOString()
+  });
+});
 
 // ============================
 // CUSTOMER ENDPOINTS
@@ -161,7 +215,7 @@ app.get('/api/stripe/customer/:customerId', async (req, res) => {
 });
 
 // ============================
-// PAYMENT METHOD ENDPOINTS (UPDATED)
+// PAYMENT METHOD ENDPOINTS
 // ============================
 
 /**
@@ -972,7 +1026,11 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`🚀 Stripe API server running on port ${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔑 Stripe configured: ${!!process.env.STRIPE_SECRET_KEY}`);
   console.log('📋 Available endpoints:');
+  console.log('  GET  /health - Health check');
+  console.log('  GET  / - API information');
   console.log('  POST /api/stripe/create-customer');
   console.log('  GET  /api/stripe/customer/:customerId/payment-methods');
   console.log('  POST /api/stripe/set-default-payment-method');
@@ -982,7 +1040,6 @@ app.listen(PORT, () => {
   console.log('  GET  /api/stripe/invoices/:customerId');
   console.log('  POST /api/stripe/webhook');
   console.log('  GET  /api/stripe/dashboard-stats');
-  console.log('  GET  /health');
 });
 
 module.exports = app;
