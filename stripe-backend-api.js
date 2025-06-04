@@ -102,6 +102,7 @@ app.get('/', (req, res) => {
       'POST /api/stripe/create-customer - Create Stripe customer',
       'POST /api/stripe/update-customer - Update customer',
       'GET /api/stripe/customer/:customerId - Get customer details',
+      'GET /api/stripe/all-customers - Get all customers (admin)',
       'GET /api/stripe/customer/:customerId/payment-methods - Get payment methods',
       'POST /api/stripe/attach-payment-method - Attach payment method',
       'POST /api/stripe/set-default-payment-method - Set default payment method',
@@ -210,6 +211,63 @@ app.get('/api/stripe/customer/:customerId', async (req, res) => {
     res.status(400).json({
       success: false,
       error: error.message
+    });
+  }
+});
+
+/**
+ * Get all Stripe customers for admin interface
+ */
+app.get('/api/stripe/all-customers', async (req, res) => {
+  try {
+    const { limit = 50, starting_after } = req.query;
+    
+    const queryParams = {
+      limit: parseInt(limit),
+      expand: ['data.subscriptions']
+    };
+
+    // Add pagination if starting_after is provided
+    if (starting_after) {
+      queryParams.starting_after = starting_after;
+    }
+
+    const customers = await stripe.customers.list(queryParams);
+    
+    // Format customer data for admin interface
+    const formattedCustomers = customers.data.map(customer => ({
+      id: customer.id,
+      name: customer.name || 'No name',
+      email: customer.email || 'No email',
+      created: customer.created,
+      subscriptions: customer.subscriptions?.data?.map(sub => ({
+        id: sub.id,
+        status: sub.status,
+        currentPeriodEnd: sub.current_period_end,
+        cancelAtPeriodEnd: sub.cancel_at_period_end
+      })) || [],
+      metadata: customer.metadata,
+      defaultSource: customer.default_source,
+      invoiceSettings: customer.invoice_settings,
+      balance: customer.balance,
+      currency: customer.currency,
+      delinquent: customer.delinquent
+    }));
+
+    res.json({
+      success: true,
+      customers: formattedCustomers,
+      hasMore: customers.has_more,
+      totalCount: customers.data.length,
+      // Include last customer ID for pagination
+      lastCustomerId: customers.data.length > 0 ? customers.data[customers.data.length - 1].id : null
+    });
+  } catch (error) {
+    console.error('Error fetching Stripe customers:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+      customers: []
     });
   }
 });
@@ -1032,6 +1090,7 @@ app.listen(PORT, () => {
   console.log('  GET  /health - Health check');
   console.log('  GET  / - API information');
   console.log('  POST /api/stripe/create-customer');
+  console.log('  GET  /api/stripe/all-customers - Get all customers (admin)');
   console.log('  GET  /api/stripe/customer/:customerId/payment-methods');
   console.log('  POST /api/stripe/set-default-payment-method');
   console.log('  DELETE /api/stripe/delete-payment-method');
