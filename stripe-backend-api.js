@@ -32,20 +32,43 @@ app.use(helmet());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' 
     ? ['https://yourdomain.com', 'https://www.yourdomain.com'] 
-    : ['http://localhost:3000', 'http://127.0.0.1:5500'],
+    : [
+        'http://localhost:3000', 
+        'http://127.0.0.1:5500',
+        'http://localhost:8000',    // Add this line
+        'http://127.0.0.1:8000',   // Add this line
+        'http://localhost:5000',   // Add common ports
+        'http://localhost:3001'    // Add common ports
+      ],
   credentials: true
 }));
 
-// For webhook verification, we need raw body
-app.use('/api/stripe/webhook', bodyParser.raw({ type: 'application/json' }));
-
-// For other routes, use JSON parser
-app.use(bodyParser.json());
-
-// Basic health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+// Or better yet, for development, allow all localhost origins:
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Allow any localhost origin for development
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
+    
+    // Allow your production domains
+    const allowedOrigins = [
+      'https://yourdomain.com',
+      'https://www.yourdomain.com',
+      'https://your-netlify-site.netlify.app'
+    ];
+    
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true
+}));
 
 // ============================
 // CUSTOMER ENDPOINTS
