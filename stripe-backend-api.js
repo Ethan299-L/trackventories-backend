@@ -30,7 +30,7 @@ const app = express();
 // Security and middleware
 app.use(helmet());
 
-// Updated CORS configuration to handle localhost development
+// FIXED CORS configuration for TrackVentories
 app.use(cors({
   origin: function (origin, callback) {
     console.log('🌐 CORS request from origin:', origin);
@@ -47,16 +47,26 @@ app.use(cors({
       return callback(null, true);
     }
     
-    // Allow your production domains
+    // Allow your ACTUAL TrackVentories domains
     const allowedOrigins = [
-      'https://yourdomain.com',
-      'https://www.yourdomain.com',
-      'https://your-netlify-site.netlify.app',
-      'https://your-github-pages.github.io'
+      'https://trackventories.com',           // Your main domain
+      'https://www.trackventories.com',       // www version
+      'https://trackventories.netlify.app',   // If using Netlify
+      'https://trackventories.github.io',     // If using GitHub Pages
+      'https://trackventories.vercel.app',    // If using Vercel
+      'https://staging.trackventories.com',   // Staging environment
+      'https://dev.trackventories.com',       // Development environment
+      'https://test.trackventories.com'       // Test environment
     ];
     
     if (allowedOrigins.includes(origin)) {
       console.log('✅ Production origin allowed:', origin);
+      return callback(null, true);
+    }
+    
+    // Additional safety net - allow any trackventories.com subdomain
+    if (origin.includes('trackventories.com')) {
+      console.log('✅ TrackVentories subdomain allowed:', origin);
       return callback(null, true);
     }
     
@@ -1099,6 +1109,7 @@ app.listen(PORT, () => {
   console.log('  GET  /api/stripe/invoices/:customerId');
   console.log('  POST /api/stripe/webhook');
   console.log('  GET  /api/stripe/dashboard-stats');
+  console.log('🌐 CORS configured for TrackVentories domains');
 });
 
 module.exports = app;
