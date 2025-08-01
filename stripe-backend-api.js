@@ -478,7 +478,7 @@ app.post('/api/stripe/create-subscription', async (req, res) => {
       payment_settings: {
         payment_method_options: {
           card: {
-            request_three_d_secure: 'if_required',
+            request_three_d_secure: 'automatic',
           },
         },
         payment_method_types: ['card'],
